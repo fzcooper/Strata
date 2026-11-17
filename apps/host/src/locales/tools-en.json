@@ -2,5 +2,10 @@
  "tl01": "Use a simple server name of up to 32 characters: letters, numbers, hyphens or underscores.",
  "tl02": "These tool servers were left out because their names are not allowed: {0}. A name can have up to 32 letters, numbers, hyphens or underscores.",
  "tl03": "These tool servers were left out because they have no program or web address: {0}.",
- "tl04": "These tool servers were left out because another one has almost the same name: {0}."
+ "tl04": "These tool servers were left out because another one has almost the same name: {0}.",
+ "tl05": "Headers for the web address",
+ "tl06": "Environment for the program",
+ "tl07": "Folder the program starts in",
+ "tl08": "The server gets these with every request. A value that is already set comes back as dots: leave the dots to keep it.",
+ "tl09": "The program reads these when it starts, and looks for its files in that folder. A value that is already set comes back as dots: leave the dots to keep it."
 }

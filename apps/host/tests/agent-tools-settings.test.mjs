@@ -18,6 +18,7 @@ import { buildProfile, CUSTOM_TOOLS_SCRIPT } from '../server/agent/profile.mjs';
 import { standardPreset } from '../server/agent/preset.mjs';
 import { TOOL_GROUPS } from '../server/agent/tools-catalog.mjs';
 import { createAgentTools } from '../server/agent/tools-settings.mjs';
+import { MASK } from '../server/native-settings.mjs';
 import { findBrowser, browserCandidates, findPlaywrightMcp } from '../server/agent/browser-probe.mjs';
 import { manualDecision, planDecision } from '../server/agent/plugins/strata-gate.mjs';
 import { createDuckDuckGoSearch, looksBlocked, parseHtmlResults, parseLiteResults, realUrl, BLOCKED_MESSAGE } from '../server/web-search-ddg.mjs';
@@ -92,6 +93,42 @@ test('Tools: the person\'s own tools are checked in plain words and saved with t
   } finally { cleanup(dir); }
 });
 
+test('Tools: what a tool server needs to start is kept, and stays kept when the screen changes anything else', () => {
+  const dir = tmp();
+  try {
+    const { tools, saved } = make(dir);
+    let v = tools.addCustom({ name: 'Board', about: 'Read the board.', kind: 'server', address: 'npx', args: ['-y', '@acme/board-mcp'], cwd: 'C:/work', env: { BOARD_TOKEN: 'secret-value' } });
+    assert.deepEqual(v.custom[0].env, { BOARD_TOKEN: MASK }, 'the names are shown, the values are masked');
+    assert.equal(v.custom[0].cwd, 'C:/work');
+    assert.ok(!JSON.stringify(v).includes('secret-value'), 'the value itself never comes to the screen');
+    for (const foreign of ['instructions', 'command', 'shell', 'timeoutSec']) {
+      assert.equal(foreign in v.custom[0], false, `a server is not given a field it has no use for: ${foreign}`);
+      assert.equal(foreign in saved().custom[0], false, `and the settings file does not gain it either: ${foreign}`);
+    }
+    assert.deepEqual(tools.profileView().servers['custom-board'], { command: 'npx', args: ['-y', '@acme/board-mcp'], cwd: 'C:/work', env: { BOARD_TOKEN: 'secret-value' } });
+    // The report: writing a value into the settings file by hand used to be dropped by the next unrelated change.
+    saved().custom[0].env.EXTRA_TOKEN = 'written by hand';
+    tools.update({ custom: { board: false } });
+    tools.update({ custom: { board: true } });
+    const kept = tools.profileView().servers['custom-board'];
+    assert.deepEqual(kept.env, { BOARD_TOKEN: 'secret-value', EXTRA_TOKEN: 'written by hand' }, 'the hand-written value survives, and the one the screen set with it');
+    // A value that is not text is never sent to the agent.
+    saved().custom[0].env.NUMBER = 123;
+    assert.equal('NUMBER' in tools.profileView().servers['custom-board'].env, false, 'a value that is not text is left out');
+    // An edit that leaves the mask keeps the saved value; a new value replaces it; a mask with nothing saved is refused.
+    v = tools.editCustom('board', { name: 'Board', about: 'Read the board.', kind: 'server', address: 'npx', args: ['-y', '@acme/board-mcp'], cwd: 'C:/work', env: { BOARD_TOKEN: MASK, NEW_TOKEN: 'fresh' } });
+    const edited = tools.profileView().servers['custom-board'].env;
+    assert.equal(edited.BOARD_TOKEN, 'secret-value', 'leaving the mask keeps the value that was saved');
+    assert.equal(edited.NEW_TOKEN, 'fresh');
+    assert.throws(() => tools.addCustom({ name: 'Other', about: 'a', kind: 'server', address: 'https://o.example/mcp', headers: { Authorization: MASK } }), /enter the new Authorization value/);
+    assert.throws(() => tools.addCustom({ name: 'Bad', about: 'a', kind: 'server', address: 'npx', env: { K: {} } }), /values must be text/);
+    // A web address carries headers instead of an environment.
+    v = tools.addCustom({ name: 'Issue tracker', about: 'Look up issues.', kind: 'server', address: 'https://issues.example/mcp', headers: { Authorization: 'Bearer x' } });
+    assert.deepEqual(v.custom.at(-1).headers, { Authorization: MASK });
+    assert.deepEqual(tools.profileView().servers['custom-issue-tracker'], { url: 'https://issues.example/mcp', headers: { Authorization: 'Bearer x' } });
+  } finally { cleanup(dir); }
+});
+
 // ---------------------------------------------------------------------------------------------- what the agent gets
 
 const entriesOf = profile => JSON.parse(profile.patch.split('\n').slice(1).join('\n'));
@@ -143,6 +180,27 @@ test('profile: the person\'s instruction and command tools are the app\'s own to
     assert.deepEqual(rows.map(r => r.config.serverName).sort(), ['custom-remote', 'strata-commands', 'strata-instructions']);
     const own = rows.find(r => r.config.serverName === 'strata-commands').config;
     assert.deepEqual([own.command, own.args[0], own.args[1]], [process.execPath, CUSTOM_TOOLS_SCRIPT, 'commands']);
+  } finally { cleanup(dir); }
+});
+
+test('profile: a person\'s server starts in the folder it names and reads the values it names; the values are in the agent environment, never in the profile text', () => {
+  const dir = tmp();
+  try {
+    const { tools } = make(dir);
+    tools.addCustom({ name: 'Board', about: 'a', kind: 'server', address: 'npx', args: ['-y', 'board'], cwd: 'C:/work', env: { BOARD_TOKEN: 'secret-value' } });
+    tools.addCustom({ name: 'Remote', about: 'a', kind: 'server', address: 'https://r.example/mcp', headers: { Authorization: 'Bearer token' } });
+    const profile = buildProfile({ local: [], connections: [], tools: tools.profileView() });
+    // The row is not plain JSON where a value stands in for an environment entry, so the text is read as it is written.
+    assert.match(profile.patch, /"serverName": "custom-board"[\s\S]{0,300}?"cwd": "C:\/work"/);
+    assert.match(profile.patch, /"serverName": "custom-remote"[\s\S]{0,200}?"transport": "streamable-http"/);
+    const variable = key => {
+      const found = new RegExp(`"${key}": !!js process\\.env\\.(\\w+)`).exec(profile.patch);
+      assert.ok(found, `${key} is not read from the environment`);
+      return found[1];
+    };
+    assert.equal(profile.env[variable('BOARD_TOKEN')], 'secret-value', 'the value reaches the agent process environment');
+    assert.equal(profile.env[variable('Authorization')], 'Bearer token');
+    assert.ok(!profile.patch.includes('secret-value') && !profile.patch.includes('Bearer token'), 'no value of theirs is in the profile text');
   } finally { cleanup(dir); }
 });
 

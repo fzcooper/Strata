@@ -8,12 +8,17 @@
  * own small tool server (custom-tools-mcp.mjs) from a JSON file this module writes, so they appear to the assistant as ordinary tools:
  * `mcp__strata-instructions__<name>` (look-only: it just returns the person's instructions) and `mcp__strata-commands__<name>`
  * (runs the person's command; asks first in Manual and is refused in Plan). A person's own tool server (a web address or a program)
- * is added as `mcp__custom-<name>__...` and asks first in Manual like any connected tool.
+ * is added as `mcp__custom-<name>__...` and asks first in Manual like any connected tool. A server carries what starting it needs: the
+ * arguments, the folder a program starts in, the environment a program reads and the headers a web address sends. Those names are always
+ * in the settings file for a server, so what the person writes there by hand stays there when anything else in the screen changes, and
+ * the values reach the agent through `mcpRows` (profile.mjs), which keeps every value out of the profile text. What is not text in the
+ * file is left out here and refused by the save check in plain words, so nothing unchecked reaches the agent.
  */
 import { mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { GROUP_IDS, TOOL_GROUPS } from './tools-catalog.mjs';
 import { SHELLS, clampTimeoutSec } from './custom-command-run.mjs';
+import { publicMcpSecrets, validateMcpSecrets } from '../native-settings.mjs';
 
 export const SEARCH_PROVIDERS = ['builtin', 'exa', 'perplexity', 'deepseek'];
 const KINDS = ['instructions', 'command', 'server'];
@@ -25,6 +30,10 @@ export const COMMANDS_SERVER = 'strata-commands';
 
 const slug = value => String(value).toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40) || 'tool';
 const clean = (value, max) => String(value ?? '').replace(/\0/g, '').slice(0, max);
+/** An object of text values as it may sit in the settings file: the names are kept, a value that is not text is left out. The save check refuses it in plain words. */
+const textMap = value => value && typeof value === 'object' && !Array.isArray(value)
+  ? Object.fromEntries(Object.entries(value).filter(([, v]) => typeof v === 'string').map(([k, v]) => [k, clean(v, 16000)]))
+  : {};
 
 function normalize(raw) {
   const r = raw && typeof raw === 'object' ? raw : {};
@@ -35,13 +44,15 @@ function normalize(raw) {
     browser: { enabled: r.browser?.enabled === true },
     // Manual mode asks once per chat before the first web search or page. This switch (off unless the person turned it on) skips that question.
     webWithoutAsking: r.webWithoutAsking === true,
-    custom: (Array.isArray(r.custom) ? r.custom : []).filter(t => t && NAME.test(t.name ?? '') && KINDS.includes(t.kind)).slice(0, MAX_CUSTOM).map(t => ({
-      id: String(t.id), name: String(t.name), about: clean(t.about, 300), kind: t.kind, enabled: t.enabled !== false,
-      instructions: clean(t.instructions, 20000), command: clean(t.command, 2000), address: clean(t.address, 2000),
-      args: (Array.isArray(t.args) ? t.args : []).slice(0, 50).map(a => clean(a, 1000)),
+    // Only the fields the kind really uses: a record the person may have edited by hand must not gain names it has no meaning for.
+    custom: (Array.isArray(r.custom) ? r.custom : []).filter(t => t && NAME.test(t.name ?? '') && KINDS.includes(t.kind)).slice(0, MAX_CUSTOM).map(t => {
+      const base = { id: String(t.id), name: String(t.name), about: clean(t.about, 300), kind: t.kind, enabled: t.enabled !== false };
+      if (t.kind === 'instructions') return { ...base, instructions: clean(t.instructions, 20000) };
       // a command tool's folder, shell and time allowed (custom-command-run.mjs); '' / 'auto' / 120 when not set
-      cwd: clean(t.cwd, 1000).trim(), shell: SHELLS.includes(t.shell) ? t.shell : 'auto', timeoutSec: clampTimeoutSec(t.timeoutSec),
-    })),
+      if (t.kind === 'command') return { ...base, command: clean(t.command, 2000), cwd: clean(t.cwd, 1000).trim(), shell: SHELLS.includes(t.shell) ? t.shell : 'auto', timeoutSec: clampTimeoutSec(t.timeoutSec) };
+      // a tool server's own settings: its arguments, the folder a program starts in, the environment it needs, and a web server's headers.
+      return { ...base, address: clean(t.address, 2000), args: (Array.isArray(t.args) ? t.args : []).slice(0, 50).map(a => clean(a, 1000)), cwd: clean(t.cwd, 1000).trim(), env: textMap(t.env), headers: textMap(t.headers) };
+    }),
   };
 }
 
@@ -52,7 +63,7 @@ function validateCustom(body, existing) {
   if (!about) throw new Error('Say what the tool does, in a sentence. The assistant reads this to decide when to use it.');
   const kind = body?.kind;
   if (!KINDS.includes(kind)) throw new Error('Choose how the tool works.');
-  const out = { name, about, kind, instructions: '', command: '', address: '', args: [], cwd: '', shell: 'auto', timeoutSec: clampTimeoutSec(undefined) };
+  const out = { name, about, kind };
   if (kind === 'instructions') {
     out.instructions = clean(body.instructions, 20000).trim();
     if (!out.instructions) throw new Error('Write the instructions the assistant should follow when it uses this tool.');
@@ -77,6 +88,15 @@ function validateCustom(body, existing) {
       if (url.username || url.password) throw new Error('Use a web address without a user name or password in it.');
     }
     out.args = (Array.isArray(body.args) ? body.args : []).slice(0, 50).map(a => clean(a, 1000)).filter(Boolean);
+    // What the server needs beyond its address: the folder a program starts in, the environment a program reads, and the
+    // headers a web address sends. The mask keeps the value that is saved, exactly as the model's own engine settings do
+    // (server/native-settings.mjs), and a field the form did not send keeps what the tool had.
+    const before = existing.find(t => t.id === body.id && t.kind === 'server');
+    out.cwd = body.cwd !== undefined ? clean(body.cwd, 1000).trim() : before?.cwd ?? '';
+    if (/[\r\n]/.test(out.cwd)) throw new Error('Put the folder on one line.');
+    const secrets = validateMcpSecrets(name, { ...(body.env !== undefined ? { env: body.env } : {}), ...(body.headers !== undefined ? { headers: body.headers } : {}) }, before);
+    out.env = secrets.env ?? (before?.env ?? {});
+    out.headers = secrets.headers ?? (before?.headers ?? {});
   }
   if (existing.some(t => t.name.toLowerCase() === name.toLowerCase() && t.id !== body.id)) throw new Error('You already have a tool with that name.');
   return out;
@@ -125,8 +145,10 @@ export function createAgentTools({ read, write, dataDir, browser = () => ({ foun
       custom: s.custom.map(t => ({
         id: t.id, name: t.name, about: t.about, kind: t.kind, enabled: t.enabled,
         summary: t.kind === 'instructions' ? t.instructions.slice(0, 80) : t.kind === 'command' ? t.command : t.address,
-        instructions: t.instructions, command: t.command, address: t.address, args: t.args,
-        ...(t.kind === 'command' ? { cwd: t.cwd, shell: t.shell, timeoutSec: t.timeoutSec } : {}),
+        ...(t.kind === 'instructions' ? { instructions: t.instructions }
+          : t.kind === 'command' ? { command: t.command, cwd: t.cwd, shell: t.shell, timeoutSec: t.timeoutSec }
+          // which names a server carries, never their values: a saved value comes back as the mask, and leaving the mask keeps it
+          : { address: t.address, args: t.args, cwd: t.cwd, ...publicMcpSecrets(t) }),
       })),
     };
   }
@@ -141,7 +163,13 @@ export function createAgentTools({ read, write, dataDir, browser = () => ({ foun
       const servers = {};
       for (const t of custom.filter(t => t.kind === 'server')) {
         const name = `custom-${t.id.replace(/_/g, "-")}`.slice(0, 32);
-        servers[name] = /^https?:\/\//i.test(t.address) ? { url: t.address } : { command: t.address, args: t.args };
+        // Only what is set, so a plain server stays a plain row. mcpRows (profile.mjs) takes a program's folder and
+        // environment and a web address's headers, and keeps every value out of the profile text.
+        const web = /^https?:\/\//i.test(t.address);
+        const extra = web
+          ? (Object.keys(t.headers ?? {}).length ? { headers: t.headers } : {})
+          : { ...(t.cwd ? { cwd: t.cwd } : {}), ...(Object.keys(t.env ?? {}).length ? { env: t.env } : {}) };
+        servers[name] = web ? { url: t.address, ...extra } : { command: t.address, args: t.args, ...extra };
       }
       return {
         off: new Set(s.off),

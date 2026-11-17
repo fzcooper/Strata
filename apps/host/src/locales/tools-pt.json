@@ -2,5 +2,10 @@
  "tl01": "Use um nome de servidor simples com até 32 caracteres: letras, números, hífens ou sublinhados.",
  "tl02": "Estes servidores de ferramentas foram deixados de fora porque os nomes não são permitidos: {0}. Um nome pode ter até 32 letras, números, hífens ou sublinhados.",
  "tl03": "Estes servidores de ferramentas foram deixados de fora porque não têm programa nem endereço web: {0}.",
- "tl04": "Estes servidores de ferramentas foram deixados de fora porque outro tem quase o mesmo nome: {0}."
+ "tl04": "Estes servidores de ferramentas foram deixados de fora porque outro tem quase o mesmo nome: {0}.",
+ "tl05": "Cabeçalhos do endereço web",
+ "tl06": "Ambiente do programa",
+ "tl07": "Pasta onde o programa é iniciado",
+ "tl08": "O servidor recebe isso em cada requisição. Um valor já definido aparece como pontos: deixe os pontos para mantê-lo.",
+ "tl09": "O programa lê isso ao iniciar e procura os seus arquivos nessa pasta. Um valor já definido aparece como pontos: deixe os pontos para mantê-lo."
 }

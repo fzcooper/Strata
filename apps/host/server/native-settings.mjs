@@ -111,8 +111,15 @@ export function validateNativeSettings(values){
  }
  return result;
 }
-const MASK='••••••••';
-export function publicMcpServers(servers){return Object.fromEntries(Object.entries(servers).map(([name,s])=>[name,{...s,...(s.env?{env:Object.fromEntries(Object.keys(s.env).map(k=>[k,MASK]))}:{}),...(s.headers?{headers:Object.fromEntries(Object.keys(s.headers).map(k=>[k,MASK]))}:{})}]));}
+export const MASK='••••••••';
+/** The environment and headers of one tool server as the screen sees them: the names stay, each value becomes the mask. */
+export function publicMcpSecrets(server){return {...(server.env?{env:Object.fromEntries(Object.keys(server.env).map(k=>[k,MASK]))}:{}),...(server.headers?{headers:Object.fromEntries(Object.keys(server.headers).map(k=>[k,MASK]))}:{})};}
+/**
+ * The environment and headers of one tool server as the settings keep them: text values only, and the mask stands for
+ * "keep the value that is saved". The same rule is used here and by Settings -> Tools (agent/tools-settings.mjs).
+ */
+export function validateMcpSecrets(name,source,previous){const out={};for(const key of ['env','headers']){if(!source[key])continue;if(typeof source[key]!=='object'||Array.isArray(source[key]))throw new Error(`${name}: ${key} must be an object.`);out[key]={};for(const [k,v] of Object.entries(source[key])){if(typeof v!=='string'||v.length>16000||v.includes('\0')||(key==='headers'&&(/[\r\n]/.test(v)||!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(k))))throw new Error(`${name}: ${key} values must be text.`);if(v===MASK){if(previous?.[key]?.[k]===undefined)throw new Error(`${name}: enter the new ${k} value.`);out[key][k]=previous[key][k];}else out[key][k]=v;}}return out;}
+export function publicMcpServers(servers){return Object.fromEntries(Object.entries(servers).map(([name,s])=>[name,{...s,...publicMcpSecrets(s)}]));}
 export function validateMcpServers(servers,previous={}){
  if(!servers||typeof servers!=='object'||Array.isArray(servers)||Object.keys(servers).length>30)throw new Error('MCP servers must be an object with at most 30 entries.');
  const out={};for(const [name,s] of Object.entries(servers)){
@@ -126,7 +133,7 @@ export function validateMcpServers(servers,previous={}){
   if(s.args&&(!Array.isArray(s.args)||s.args.length>100||s.args.some(v=>typeof v!=='string'||v.length>4000||v.includes('\0'))))throw new Error(`${name}: arguments must be a list of strings.`);
   if(s.cwd!==undefined&&(typeof s.cwd!=='string'||s.cwd.length>4000||/[\r\n\0]/.test(s.cwd)))throw new Error(`${name}: choose a valid working directory.`);
   if(s.disabled!==undefined&&typeof s.disabled!=='boolean')throw new Error(`${name}: disabled must be true or false.`);
-  out[name]={...s};for(const key of ['env','headers'])if(s[key]){if(typeof s[key]!=='object'||Array.isArray(s[key]))throw new Error(`${name}: ${key} must be an object.`);out[name][key]={};for(const [k,v] of Object.entries(s[key])){if(typeof v!=='string'||v.length>16000||v.includes('\0')||(key==='headers'&&(/[\r\n]/.test(v)||!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(k))))throw new Error(`${name}: ${key} values must be text.`);if(v===MASK){if(previous[name]?.[key]?.[k]===undefined)throw new Error(`${name}: enter the new ${k} value.`);out[name][key][k]=previous[name][key][k];}else out[name][key][k]=v;}}
+  out[name]={...s,...validateMcpSecrets(name,s,previous[name])};
  }
  return out;
 }

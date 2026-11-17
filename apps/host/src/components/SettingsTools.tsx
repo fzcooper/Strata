@@ -31,6 +31,10 @@ export interface CustomTool {
   command?: string;
   address?: string;
   args?: string[];
+  /** A tool server's own settings: the folder a program starts in, the environment it reads, a web address's headers. The values come back masked. */
+  cwd?: string;
+  env?: Record<string, string>;
+  headers?: Record<string, string>;
 }
 export interface ToolsState {
   groups: ToolGroup[];
@@ -68,8 +72,24 @@ interface Draft {
   command: string;
   address: string;
   args: string;
+  /** A server's environment, folder and headers, as the lines the person reads and writes. */
+  env: string;
+  cwd: string;
+  headers: string;
 }
-const blank = (): Draft => ({ name: '', about: '', kind: 'instructions', instructions: '', command: '', address: '', args: '' });
+const blank = (): Draft => ({ name: '', about: '', kind: 'instructions', instructions: '', command: '', address: '', args: '', env: '', cwd: '', headers: '' });
+/** One pair per line, as the person writes it: a name, a separator, a value. */
+const pairsToLines = (value: Record<string, string> | undefined, separator: string) => Object.entries(value ?? {}).map(([name, text]) => `${name}${separator}${text}`).join('\n');
+const linesToPairs = (text: string, separator: string) => {
+  const out: Record<string, string> = {};
+  for (const line of text.split('\n').map(l => l.trim()).filter(Boolean)) {
+    const at = line.indexOf(separator);
+    if (at < 1 || !line.slice(at + separator.length).trim()) return null;
+    out[line.slice(0, at).trim()] = line.slice(at + separator.length).trim();
+  }
+  return out;
+};
+const isWebAddress = (address: string) => /^https?:\/\//i.test(address);
 
 export function SettingsTools({ preview }: { preview?: ToolsState }) {
   const [state, setState] = useState<ToolsState | null>(preview ?? null);
@@ -105,9 +125,24 @@ export function SettingsTools({ preview }: { preview?: ToolsState }) {
     if (draft.kind === 'instructions' && !draft.instructions.trim()) { setFormError('Write the instructions the assistant should follow when it uses this tool.'); return; }
     if (draft.kind === 'command' && !draft.command.trim()) { setFormError('Enter the command to run.'); return; }
     if (draft.kind === 'server' && !draft.address.trim()) { setFormError('Enter the tool server’s web address, or the program that starts it.'); return; }
+    // What a server needs beyond its address. Leaving a field empty clears what was there; a value shown as dots is sent back
+    // as it is, and the host keeps the saved one (server/agent/tools-settings.mjs).
+    let extra: Record<string, unknown> = {};
+    if (draft.kind === 'server') {
+      if (isWebAddress(draft.address)) {
+        const headers = linesToPairs(draft.headers, ': ');
+        if (!headers) { setFormError('Write each header as a name, a colon, and the value, one per line.'); return; }
+        extra = { headers };
+      } else {
+        const env = linesToPairs(draft.env, '=');
+        if (!env) { setFormError('Write each setting as a name, an equals sign, and the value, one per line.'); return; }
+        if (/[\r\n]/.test(draft.cwd.trim())) { setFormError('Put the folder on one line.'); return; }
+        extra = { env, cwd: draft.cwd.trim() };
+      }
+    }
     setBusy(true);
     try {
-      const body = { name: draft.name.trim(), about: draft.about.trim(), kind: draft.kind, instructions: draft.instructions, command: draft.command.trim(), address: draft.address.trim(), args: draft.args.split('\n').map(a => a.trim()).filter(Boolean) };
+      const body = { name: draft.name.trim(), about: draft.about.trim(), kind: draft.kind, instructions: draft.instructions, command: draft.command.trim(), address: draft.address.trim(), args: draft.args.split('\n').map(a => a.trim()).filter(Boolean), ...extra };
       setState(draft.id ? await api.patch<ToolsState>(`/api/agent/tools/custom/${encodeURIComponent(draft.id)}`, body) : await api.post<ToolsState>('/api/agent/tools/custom', body));
       setDraft(null); setFormError('');
     } catch (e) { setFormError(e instanceof Error ? e.message : 'The tool could not be saved.'); }
@@ -162,7 +197,7 @@ export function SettingsTools({ preview }: { preview?: ToolsState }) {
       {state.custom.length ? <div className="st-card st-card--flush">
         {state.custom.map(t => <Field key={t.id} label={tr(t.name)} hint={<>{tr(t.about)} <span className="muted">· {tr(KIND_NAMES[t.kind])}</span></>}>
           <div className="row">
-            <Btn size="sm" disabled={busy} onClick={() => { setFormError(''); setDraft({ id: t.id, name: t.name, about: t.about, kind: t.kind, instructions: t.instructions ?? '', command: t.command ?? '', address: t.address ?? '', args: (t.args ?? []).join('\n') }); }}>{tr('Edit')}</Btn>
+            <Btn size="sm" disabled={busy} onClick={() => { setFormError(''); setDraft({ id: t.id, name: t.name, about: t.about, kind: t.kind, instructions: t.instructions ?? '', command: t.command ?? '', address: t.address ?? '', args: (t.args ?? []).join('\n'), env: pairsToLines(t.env, '='), cwd: t.cwd ?? '', headers: pairsToLines(t.headers, ': ') }); }}>{tr('Edit')}</Btn>
             <Btn size="sm" disabled={busy} onClick={() => setRemove(t)}>{tr('Remove')}</Btn>
             <button className="st-toggle" role="switch" aria-checked={t.enabled} aria-label={tr(t.name)} disabled={busy} onClick={() => void save({ custom: { [t.id]: !t.enabled } })} />
           </div>
@@ -184,6 +219,14 @@ export function SettingsTools({ preview }: { preview?: ToolsState }) {
         {draft.kind === 'server' ? <>
           <label className="input-field"><span>{tr('Web address or program')}</span><input className="st-input" aria-label={tr('Web address or program')} value={draft.address} placeholder={tr('https://… or the program that starts the server')} spellCheck={false} onChange={e => setDraft({ ...draft, address: e.target.value })} /></label>
           <label className="input-field"><span>{tr('Extra settings for the program ')}<span className="muted">{tr('(optional, one per line)')}</span></span><textarea className="st-input" rows={3} aria-label={tr('Extra settings for the program')} value={draft.args} spellCheck={false} onChange={e => setDraft({ ...draft, args: e.target.value })} /></label>
+          {isWebAddress(draft.address) ? <>
+            <label className="input-field"><span>{tr('Headers for the web address')}<span className="muted">{tr('(optional, one per line)')}</span></span><textarea className="st-input" rows={3} aria-label={tr('Headers for the web address')} value={draft.headers} spellCheck={false} onChange={e => setDraft({ ...draft, headers: e.target.value })} /></label>
+            <p className="small muted">{tr('The server gets these with every request. A value that is already set comes back as dots: leave the dots to keep it.')}</p>
+          </> : <>
+            <label className="input-field"><span>{tr('Environment for the program')}<span className="muted">{tr('(optional, one per line)')}</span></span><textarea className="st-input" rows={3} aria-label={tr('Environment for the program')} value={draft.env} spellCheck={false} onChange={e => setDraft({ ...draft, env: e.target.value })} /></label>
+            <label className="input-field"><span>{tr('Folder the program starts in')}</span><input className="st-input" aria-label={tr('Folder the program starts in')} value={draft.cwd} spellCheck={false} onChange={e => setDraft({ ...draft, cwd: e.target.value })} /></label>
+            <p className="small muted">{tr('The program reads these when it starts, and looks for its files in that folder. A value that is already set comes back as dots: leave the dots to keep it.')}</p>
+          </>}
         </> : null}
         {formError ? <p className="small" role="alert" style={{ color: 'var(--danger, #b3261e)' }}>{tr(formError)}</p> : null}
       </div> : null}
